@@ -54,4 +54,20 @@
 		],
 		"description": ""
 	},
+	"L-Succ": {
+		"scope": "plaintext",
+		"prefix": "L-Succ",
+		"body": [
+			"L-Succ"
+		],
+		"description": ""
+	},
+	"L-Trans": {
+		"scope": "plaintext",
+		"prefix": "L-Trans",
+		"body": [
+			"L-Trans",
+		],
+		"description": ""
+	},
 }
