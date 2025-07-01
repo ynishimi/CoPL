@@ -1,4 +1,3 @@
-# derivation_system.py (最終修正版)
 import sys
 import re
 from dataclasses import dataclass, field
@@ -91,7 +90,7 @@ class EIf(Derivation):
         return f"{indent}{self.expr} evalto {val_str} by {self.rule_name} {{\n{premise_str}\n{indent}}}{last_char}"
 
 # -------------------------------------------------------------------
-# 3. パーサー (Parser) - ★★★ ifの優先順位を修正 ★★★
+# 3. パーサー (Parser)
 # -------------------------------------------------------------------
 class Parser:
     def __init__(self, tokens: List[str]): self.tokens, self.pos = tokens, 0
@@ -113,7 +112,7 @@ class Parser:
         self.pos += 1
 
     def parse_expression(self) -> Expression:
-        return self.parse_if() # ★修正: 解析は常にif(最低優先順位)から試みる
+        return self.parse_if()
 
     def parse_if(self) -> Expression:
         if self.current_token() == 'if':
