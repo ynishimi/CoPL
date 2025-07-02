@@ -2,7 +2,7 @@
 import sys
 import re
 from dataclasses import dataclass, field
-from typing import List, Union, Tuple
+from typing import List, Union, Tuple, Optional
 
 # -------------------------------------------------------------------
 # 1. 式の構造 (AST) と値の定義
@@ -26,7 +26,6 @@ class Variable(Expression):
     name: str
     def __str__(self): return self.name
 
-# 優先順位: App(5) > *(4) > +/-(3) > ::(2) > <(1) > let/if/match(0)
 precedence = {'App': 5, 'Times': 4, 'Plus': 3, 'Minus': 3, 'Cons': 2, 'LessThan': 1, 'If': 0, 'Let': 0, 'LetRec': 0, 'Fun': 0, 'Match': 0}
 
 @dataclass
@@ -37,12 +36,12 @@ class BinaryOp(Expression):
     def to_string(self) -> str:
         my_prec = self.get_precedence()
         left_str = self.left.to_string()
-        if self.left.get_precedence() < my_prec: left_str = f"({left_str})"
         right_str = self.right.to_string()
-        # Cons(::)は右結合
-        if self.op == '::':
+        if self.op == '::': # Right-associative
+            if self.left.get_precedence() <= my_prec: left_str = f"({left_str})"
             if self.right.get_precedence() < my_prec: right_str = f"({right_str})"
-        else: # 他の演算子は左結合
+        else: # Left-associative
+            if self.left.get_precedence() < my_prec: left_str = f"({left_str})"
             if self.right.get_precedence() <= my_prec: right_str = f"({right_str})"
         return f"{left_str} {self.op} {right_str}"
 
@@ -60,24 +59,28 @@ class Cons(BinaryOp):
 @dataclass
 class Nil(Expression):
     def __str__(self): return "[]"
+    def to_string(self): return "[]"
 
 @dataclass
 class If(Expression):
     cond: Expression; true_branch: Expression; false_branch: Expression
-    def __str__(self): return f"if {self.cond} then {self.true_branch} else {self.false_branch}"
+    def __str__(self): return self.to_string()
     def get_precedence(self): return precedence.get(self.__class__.__name__, 0)
+    def to_string(self): return f"if {self.cond.to_string()} then {self.true_branch.to_string()} else {self.false_branch.to_string()}"
 
 @dataclass
 class Let(Expression):
     var: str; bound_expr: Expression; body_expr: Expression
-    def __str__(self): return f"let {self.var} = {self.bound_expr} in {self.body_expr}"
+    def __str__(self): return self.to_string()
     def get_precedence(self): return precedence.get(self.__class__.__name__, 0)
+    def to_string(self): return f"let {self.var} = {self.bound_expr.to_string()} in {self.body_expr.to_string()}"
 
 @dataclass
 class Fun(Expression):
     arg_name: str; body: Expression
-    def __str__(self): return f"fun {self.arg_name} -> {self.body}"
+    def __str__(self): return self.to_string()
     def get_precedence(self): return precedence.get(self.__class__.__name__, 0)
+    def to_string(self): return f"fun {self.arg_name} -> {self.body.to_string()}"
 
 @dataclass
 class App(Expression):
@@ -93,20 +96,28 @@ class App(Expression):
 @dataclass
 class LetRec(Expression):
     func_name: str; arg_name: str; func_body: Expression; let_body: Expression
-    def __str__(self): return f"let rec {self.func_name} = fun {self.arg_name} -> {self.func_body} in {self.let_body}"
+    def __str__(self): return self.to_string()
     def get_precedence(self): return precedence.get(self.__class__.__name__, 0)
+    def to_string(self): return f"let rec {self.func_name} = fun {self.arg_name} -> {self.func_body.to_string()} in {self.let_body.to_string()}"
 
 @dataclass
 class Match(Expression):
     match_expr: Expression; nil_branch: Expression; head_var: str; tail_var: str; cons_branch: Expression
-    def __str__(self): return f"match {self.match_expr} with [] -> {self.nil_branch} | {self.head_var} :: {self.tail_var} -> {self.cons_branch}"
+    def __str__(self): return self.to_string()
     def get_precedence(self): return precedence.get(self.__class__.__name__, 0)
+    def to_string(self): return f"match {self.match_expr.to_string()} with [] -> {self.nil_branch.to_string()} | {self.head_var} :: {self.tail_var} -> {self.cons_branch.to_string()}"
 
 # --- 値と環境の定義 ---
 def format_list_value(l: list) -> str:
     if not l: return "[]"
-    items = " :: ".join(map(format_value, l))
-    return f"{items} :: []"
+    items = []
+    for item in l:
+        formatted = format_value(item)
+        if isinstance(item, list) and item:
+            items.append(f"({formatted})")
+        else:
+            items.append(formatted)
+    return " :: ".join(items) + " :: []"
 
 def format_value(v: 'Value') -> str:
     if isinstance(v, bool): return str(v).lower()
@@ -174,7 +185,7 @@ class EGeneric(Derivation):
     def format(self, i=0) -> str:
         indent, val_str = " " * i, format_value(self.value)
         premise_str = "\n".join(p.format(i + 1) for p in self.premises)
-        return f"{indent}{format_env(self.env)}|- {self.expr} evalto {val_str} by {self.rule_name} {{\n{premise_str}\n{indent}}};"
+        return f"{indent}{format_env(self.env)}|- {self.expr.to_string()} evalto {val_str} by {self.rule_name} {{\n{premise_str}\n{indent}}};"
 @dataclass
 class EFun(Derivation):
     env: Environment; value: Closure
@@ -351,13 +362,16 @@ def evaluate(env: Environment, node: Expression) -> tuple[Value, Derivation]:
     raise TypeError(f"不明な式の型です: {type(node)}")
 
 def lookup_var_in_env(env: Environment, name: str) -> tuple[Value, Derivation]:
-    # Search for the variable from the most recent binding (end of the list)
-    for var, val in reversed(env):
-        if var == name:
-            # Found it. Return the value and a single E-Var derivation.
-            return val, EVar(env, name, val)
-    # If the loop completes without finding the variable
-    raise NameError(f"未定義の変数です: '{name}'")
+    if not env: raise NameError(f"未定義の変数です: '{name}'")
+    
+    last_var, last_val = env[-1]
+    rest_env = env[:-1]
+    
+    if last_var == name:
+        return last_val, EVar(env, name, last_val)
+    else:
+        val_in_rest, premise_deriv = lookup_var_in_env(rest_env, name)
+        return val_in_rest, EVar(env, name, val_in_rest)
 
 # -------------------------------------------------------------------
 # 5. メイン実行部
@@ -365,16 +379,22 @@ def lookup_var_in_env(env: Environment, name: str) -> tuple[Value, Derivation]:
 def parse_env_str(env_str: str) -> Environment:
     if not env_str.strip(): return []
     env: Environment = []
+    # This is a simplified parser for environment.
+    # It cannot handle complex values like lists or functions in the initial environment.
     for binding in env_str.split(','):
         parts = binding.split('=')
         if len(parts) != 2: continue
         var, val_str = parts[0].strip(), parts[1].strip()
-        if val_str == 'true': value: Value = True
-        elif val_str == 'false': value = False
-        else:
-            try: value = int(val_str)
-            except ValueError: raise SyntaxError(f"環境の値が無効です: {val_str}")
-        env.append((var, value))
+        
+        # Try to parse the value as an expression itself
+        try:
+            val_ast = run_parser_on_text(val_str)
+            # Evaluate the expression in the current environment context
+            value, _ = evaluate(env, val_ast)
+            env.append((var, value))
+        except (SyntaxError, NameError):
+             raise SyntaxError(f"環境の値が無効です: {val_str}")
+
     return env
 
 def main():
