@@ -11,8 +11,6 @@ import copy
 class Type:
     def __str__(self): return "unknown"
     def __eq__(self, other):
-        # 型の等価性比較は、型の文字列表現に依存します。
-        # これにより、解決済みの型変数も正しく比較されます。
         if not isinstance(other, Type): return False
         return str(self) == str(other)
     def __hash__(self):
@@ -31,8 +29,6 @@ class TArrow(Type):
     param_type: Type
     return_type: Type
     def __str__(self):
-        # 引数型が関数型の場合、括弧で囲みます。
-        # [修正点] resolve を使って型変数の先をたどり、正しく関数型か判定します。
         p_type_resolved = resolve(self.param_type)
         p_str = str(self.param_type)
         if isinstance(p_type_resolved, TArrow):
@@ -43,8 +39,6 @@ class TArrow(Type):
 class TList(Type):
     element_type: Type
     def __str__(self):
-        # 要素型が関数型の場合、括弧で囲みます。
-        # [修正点] resolve を使って型変数の先をたどり、正しく関数型か判定します。
         e_type_resolved = resolve(self.element_type)
         e_str = str(self.element_type)
         if isinstance(e_type_resolved, TArrow):
@@ -65,8 +59,6 @@ class TVar(Type):
         self.instance: Optional[Type] = None
     
     def __str__(self):
-        # 型変数が解決済み（具体型に束縛済み）であれば、その具体型を返します。
-        # 未解決であれば、't0, 't1 のような名前を返します。
         if self.instance:
             return str(resolve(self.instance))
         return f"'t{self.id}"
@@ -78,7 +70,6 @@ class Expression:
     def to_string(self) -> str: return str(self)
     def get_precedence(self): return 99
 
-# ... (ASTクラスは変更なし) ...
 @dataclass
 class IntLiteral(Expression):
     value: int
@@ -150,12 +141,10 @@ class Fun(Expression):
     def __str__(self): return self.to_string()
     def get_precedence(self): return precedence.get(self.__class__.__name__, 0)
     def to_string(self):
-        # ASTのto_stringでは型変数を表示したくないので、解決済みの型を使う
         arg_type_str = ""
         if self.arg_type:
             arg_type_str = f" : {resolve(self.arg_type)}"
         return f"fun {self.arg_name}{arg_type_str} -> {self.body.to_string()}"
-
 
 @dataclass
 class App(Expression):
@@ -170,10 +159,13 @@ class App(Expression):
 
 @dataclass
 class LetRec(Expression):
-    func_name: str; func_type: Type; arg_name: str; arg_type: Type; func_body: Expression; let_body: Expression
+    var: str
+    bound_expr: Expression # Must be a Fun expression
+    body_expr: Expression
     def __str__(self): return self.to_string()
-    def get_precedence(self): return precedence.get(self.__class__.__name__, 0)
-    def to_string(self): return f"let rec {self.func_name} : {self.func_type} = fun ({self.arg_name} : {self.arg_type}) -> {self.func_body.to_string()} in {self.let_body.to_string()}"
+    def get_precedence(self): return 0
+    def to_string(self):
+        return f"let rec {self.var} = {self.bound_expr.to_string()} in {self.body_expr.to_string()}"
 
 @dataclass
 class Match(Expression):
@@ -189,10 +181,6 @@ Token = Tuple[str, str]
 # 3. 導出規則 (Derivation)
 # -------------------------------------------------------------------
 def format_tenv(tenv: TypeEnv) -> str:
-    """
-    型環境を整形して文字列にします。
-    [修正点] 表示する前に各型を resolve し、推論結果を反映させます。
-    """
     if not tenv: return ""
     return ", ".join(f"{var}:{resolve(t)}" for var, t in tenv) + " "
 
@@ -204,7 +192,6 @@ class TGeneric(Derivation):
     tenv: TypeEnv; expr: Expression; type: Type; rule_name: str; premises: List[Derivation]
     def format(self, i=0) -> str:
         indent = " " * i
-        # 表示する際は、常に解決済みの型を使う
         resolved_type = resolve(self.type)
         if not self.premises:
             return f"{indent}{format_tenv(self.tenv)}|- {self.expr.to_string()} : {resolved_type} by {self.rule_name} {{}};"
@@ -217,17 +204,14 @@ class TGeneric(Derivation):
 # -------------------------------------------------------------------
 
 def resolve(t: Type) -> Type:
-    """型変数の連鎖をたどり、最終的な型を返す。"""
     if isinstance(t, TVar) and t.instance:
         t.instance = resolve(t.instance)
         return t.instance
     return t
 
 def unify(t1: Type, t2: Type):
-    """二つの型を単一化する。"""
     t1 = resolve(t1)
     t2 = resolve(t2)
-
     if isinstance(t1, TVar):
         if t1 != t2: t1.instance = t2
         return
@@ -239,7 +223,6 @@ def unify(t1: Type, t2: Type):
         unify(t1.return_type, t2.return_type)
         return
     if isinstance(t1, TList) and isinstance(t2, TList):
-        # [] の型推論のために、片方が未解決のリスト型の場合を考慮
         if isinstance(resolve(t1.element_type), TError):
              unify(t1.element_type, t2.element_type)
         elif isinstance(resolve(t2.element_type), TError):
@@ -250,14 +233,14 @@ def unify(t1: Type, t2: Type):
     if t1 != t2:
         raise TypeError(f"型が一致しません: {t1} と {t2}")
 
-
 def type_infer(tenv: TypeEnv, expr: Expression, hint_type: Optional[Type] = None) -> Tuple[Type, Derivation]:
     if isinstance(expr, IntLiteral): return TInt(), TGeneric(tenv, expr, TInt(), "T-Int", [])
     if isinstance(expr, BoolLiteral): return TBool(), TGeneric(tenv, expr, TBool(), "T-Bool", [])
     if isinstance(expr, Nil):
         elem_type = TVar()
         list_type = TList(elem_type)
-        if hint_type: unify(list_type, hint_type)
+        if hint_type:
+            unify(list_type, hint_type)
         return list_type, TGeneric(tenv, expr, list_type, "T-Nil", [])
 
     if isinstance(expr, Variable):
@@ -266,6 +249,13 @@ def type_infer(tenv: TypeEnv, expr: Expression, hint_type: Optional[Type] = None
         raise TypeError(f"未定義の変数です: {expr.name}")
 
     if isinstance(expr, BinaryOp):
+        if expr.op == '::':
+            t1, d1 = type_infer(tenv, expr.left)
+            hint_for_right = TList(t1)
+            t2, d2 = type_infer(tenv, expr.right, hint_type=hint_for_right)
+            unify(t2, hint_for_right)
+            return resolve(t2), TGeneric(tenv, expr, resolve(t2), "T-Cons", [d1, d2])
+
         t1, d1 = type_infer(tenv, expr.left)
         t2, d2 = type_infer(tenv, expr.right)
         if expr.op in ['+', '-', '*']:
@@ -277,10 +267,6 @@ def type_infer(tenv: TypeEnv, expr: Expression, hint_type: Optional[Type] = None
             unify(t1, TInt())
             unify(t2, TInt())
             return TBool(), TGeneric(tenv, expr, TBool(), "T-Lt", [d1, d2])
-        if expr.op == '::':
-            list_type = TList(t1)
-            unify(list_type, t2)
-            return resolve(t2), TGeneric(tenv, expr, resolve(t2), "T-Cons", [d1, d2])
 
     if isinstance(expr, If):
         t_cond, d_cond = type_infer(tenv, expr.cond)
@@ -295,70 +281,58 @@ def type_infer(tenv: TypeEnv, expr: Expression, hint_type: Optional[Type] = None
         t1, d1 = type_infer(tenv, expr.bound_expr, hint_type=expr.var_type)
         if expr.var_type:
             unify(t1, expr.var_type)
-        
         resolved_t1 = resolve(t1)
         t2, d2 = type_infer(tenv + [(expr.var, resolved_t1)], expr.body_expr, hint_type=hint_type)
         return t2, TGeneric(tenv, expr, t2, "T-Let", [d1, d2])
 
     if isinstance(expr, Fun):
-        # arg_type_for_inference は、元のASTノード 'expr' を変更せずに、
-        # 型推論のボディ部分で使用する型を保持します。
-        # これにより、表示される出力が元のソースコードを反映するようになります。
         arg_type_for_inference = expr.arg_type
         ret_hint = None
-
         if isinstance(hint_type, TArrow):
             if arg_type_for_inference is None:
                 arg_type_for_inference = hint_type.param_type
             else:
                 unify(arg_type_for_inference, hint_type.param_type)
             ret_hint = hint_type.return_type
-
         if arg_type_for_inference is None:
             arg_type_for_inference = TVar()
-
         new_tenv = tenv + [(expr.arg_name, arg_type_for_inference)]
         ret_type, d_body = type_infer(new_tenv, expr.body, hint_type=ret_hint)
-        
         func_type = TArrow(arg_type_for_inference, ret_type)
-        # 導出の構築には元の 'expr' を使用するため、その文字列表現は
-        # 推論プロセスによる影響を受けません。
         return func_type, TGeneric(tenv, expr, func_type, "T-Fun", [d_body])
 
     if isinstance(expr, App):
         t_func, d_func = type_infer(tenv, expr.func_expr)
         t_arg, d_arg = type_infer(tenv, expr.arg_expr)
-        
         ret_type = TVar()
         expected_func_type = TArrow(t_arg, ret_type)
         unify(t_func, expected_func_type)
-        
         final_ret_type = resolve(ret_type)
         return final_ret_type, TGeneric(tenv, expr, final_ret_type, "T-App", [d_func, d_arg])
 
     if isinstance(expr, LetRec):
-        unify(expr.func_type, TArrow(expr.arg_type, TVar())) # func_typeが関数型であることを保証
-        
-        env_for_body = tenv + [(expr.func_name, expr.func_type), (expr.arg_name, expr.arg_type)]
-        t_body, d_body = type_infer(env_for_body, expr.func_body)
-        
-        # func_typeの戻り値部分と実際の本体の戻り値を単一化
-        unify(expr.func_type.return_type, t_body)
-        
-        env_for_in = tenv + [(expr.func_name, expr.func_type)]
-        t_in, d_in = type_infer(env_for_in, expr.let_body)
-        return t_in, TGeneric(tenv, expr, t_in, "T-LetRec", [d_body, d_in])
+        if not isinstance(expr.bound_expr, Fun):
+            raise TypeError("let recの右辺は関数である必要があります")
+        fun_node = expr.bound_expr
+        arg_type = TVar()
+        ret_type = TVar()
+        func_type = TArrow(arg_type, ret_type)
+        if fun_node.arg_type:
+            unify(arg_type, fun_node.arg_type)
+        env_for_fun_body = tenv + [(expr.var, func_type), (fun_node.arg_name, arg_type)]
+        inferred_ret_type, d1 = type_infer(env_for_fun_body, fun_node.body)
+        unify(ret_type, inferred_ret_type)
+        env_for_in_part = tenv + [(expr.var, func_type)]
+        final_type, d2 = type_infer(env_for_in_part, expr.body_expr, hint_type=hint_type)
+        return final_type, TGeneric(tenv, expr, final_type, "T-LetRec", [d1, d2])
 
     if isinstance(expr, Match):
         t_match, d_match = type_infer(tenv, expr.match_expr)
         elem_type = TVar()
         unify(t_match, TList(elem_type))
-        
         t_nil, d_nil = type_infer(tenv, expr.nil_branch)
-        
         env_cons = tenv + [(expr.head_var, resolve(elem_type)), (expr.tail_var, resolve(t_match))]
         t_cons, d_cons = type_infer(env_cons, expr.cons_branch)
-        
         unify(t_nil, t_cons)
         res_type = resolve(t_nil)
         return res_type, TGeneric(tenv, expr, res_type, "T-Match", [d_match, d_nil, d_cons])
@@ -368,7 +342,6 @@ def type_infer(tenv: TypeEnv, expr: Expression, hint_type: Optional[Type] = None
 # -------------------------------------------------------------------
 # 5. パーサー (Parser with Type Annotations)
 # -------------------------------------------------------------------
-# ... (Parserは変更なし) ...
 class Parser:
     def __init__(self, tokens: List[Token]): self.tokens, self.pos = tokens, 0
     @classmethod
@@ -398,7 +371,6 @@ class Parser:
             return TArrow(t, self.parse_type())
         return t
     def parse_atomic_type(self) -> Type:
-        # list修飾子を考慮してprimary_typeから変更
         base_type = self.parse_primary_type()
         if self.current_token() and self.current_token()[1] == 'list':
             self.consume('list')
@@ -421,7 +393,8 @@ class Parser:
         return self.parse_comparison()
     def parse_let(self) -> Expression:
         self.consume('let')
-        if self.current_token() and self.current_token()[1] == 'rec': return self.parse_let_rec()
+        if self.current_token() and self.current_token()[1] == 'rec':
+            return self.parse_let_rec()
         _, var_name = self.current_token(); self.consume(var_name)
         var_type = None
         if self.current_token() and self.current_token()[1] == ':':
@@ -431,10 +404,15 @@ class Parser:
         bound_expr = self.parse_expression(); self.consume('in'); body_expr = self.parse_expression()
         return Let(var_name, bound_expr, body_expr, var_type)
     def parse_let_rec(self) -> Expression:
-        self.consume('rec'); _, func_name = self.current_token(); self.consume(func_name); self.consume(':'); func_type = self.parse_type(); self.consume('=')
-        self.consume('fun'); self.consume('('); _, arg_name = self.current_token(); self.consume(arg_name); self.consume(':'); arg_type = self.parse_type(); self.consume(')')
-        self.consume('->'); func_body = self.parse_expression(); self.consume('in'); let_body = self.parse_expression()
-        return LetRec(func_name, func_type, arg_name, arg_type, func_body, let_body)
+        self.consume('rec')
+        _, var_name = self.current_token(); self.consume(var_name)
+        self.consume('=')
+        bound_expr = self.parse_expression()
+        if not isinstance(bound_expr, Fun):
+            raise SyntaxError("let recの右辺は関数リテラルである必要があります")
+        self.consume('in')
+        body_expr = self.parse_expression()
+        return LetRec(var_name, bound_expr, body_expr)
     def parse_fun(self) -> Expression:
         self.consume('fun')
         has_paren = self.current_token() and self.current_token()[1] == '('
@@ -461,7 +439,8 @@ class Parser:
         return If(cond, true_branch, false_branch)
     def parse_match(self) -> Expression:
         self.consume('match'); match_expr = self.parse_expression(); self.consume('with')
-        self.consume('[]'); self.consume('->'); nil_branch = self.parse_expression()
+        self.consume('['); self.consume(']') # [修正点] '[]'ではなく、'['と']'を別々に消費する
+        self.consume('->'); nil_branch = self.parse_expression()
         self.consume('|'); _, head_var = self.current_token(); self.consume(head_var); self.consume('::'); _, tail_var = self.current_token(); self.consume(tail_var); self.consume('->')
         cons_branch = self.parse_expression()
         return Match(match_expr, nil_branch, head_var, tail_var, cons_branch)
@@ -489,7 +468,6 @@ class Parser:
             token = self.current_token()
             if token is None: break
             kind, val = token
-            # ifの後に続く式などを考慮し、キーワードでない限り適用とみなす
             if kind in ['INT', 'ID', 'TRUE', 'FALSE'] or val in ['(', '[']: 
                 node = App(node, self.parse_primary())
             else: break
