@@ -11,11 +11,12 @@ import copy
 class Type:
     def __str__(self): return "unknown"
     def __eq__(self, other):
+        # 型の等価性比較は、型の文字列表現に依存します。
+        # これにより、解決済みの型変数も正しく比較されます。
         if not isinstance(other, Type): return False
         return str(self) == str(other)
     def __hash__(self):
         return hash(str(self))
-
 
 @dataclass(frozen=True)
 class TInt(Type):
@@ -30,6 +31,7 @@ class TArrow(Type):
     param_type: Type
     return_type: Type
     def __str__(self):
+        # 引数型が関数型の場合、括弧で囲みます。
         p_str = str(self.param_type)
         if isinstance(self.param_type, TArrow):
             p_str = f"({p_str})"
@@ -39,6 +41,7 @@ class TArrow(Type):
 class TList(Type):
     element_type: Type
     def __str__(self):
+        # 要素型が関数型の場合、括弧で囲みます。
         e_str = str(self.element_type)
         if isinstance(self.element_type, TArrow):
              e_str = f"({e_str})"
@@ -49,6 +52,21 @@ class TError(Type):
     message: str = "error"
     def __str__(self): return self.message
 
+class TVar(Type):
+    """型推論のための一時的な型変数を表すクラス。"""
+    _id_counter = 0
+    def __init__(self):
+        self.id = TVar._id_counter
+        TVar._id_counter += 1
+        self.instance: Optional[Type] = None
+    
+    def __str__(self):
+        # 型変数が解決済み（具体型に束縛済み）であれば、その具体型を返します。
+        # 未解決であれば、't0, 't1 のような名前を返します。
+        if self.instance:
+            return str(resolve(self.instance))
+        return f"'t{self.id}"
+
 # -------------------------------------------------------------------
 # 2. 式の構造 (AST)
 # -------------------------------------------------------------------
@@ -56,6 +74,7 @@ class Expression:
     def to_string(self) -> str: return str(self)
     def get_precedence(self): return 99
 
+# ... (ASTクラスは変更なし) ...
 @dataclass
 class IntLiteral(Expression):
     value: int
@@ -127,9 +146,12 @@ class Fun(Expression):
     def __str__(self): return self.to_string()
     def get_precedence(self): return precedence.get(self.__class__.__name__, 0)
     def to_string(self):
+        # ASTのto_stringでは型変数を表示したくないので、解決済みの型を使う
+        arg_type_str = ""
         if self.arg_type:
-            return f"fun ({self.arg_name} : {self.arg_type}) -> {self.body.to_string()}"
-        return f"fun {self.arg_name} -> {self.body.to_string()}"
+            arg_type_str = f" : {resolve(self.arg_type)}"
+        return f"fun {self.arg_name}{arg_type_str} -> {self.body.to_string()}"
+
 
 @dataclass
 class App(Expression):
@@ -174,103 +196,171 @@ class TGeneric(Derivation):
     tenv: TypeEnv; expr: Expression; type: Type; rule_name: str; premises: List[Derivation]
     def format(self, i=0) -> str:
         indent = " " * i
+        # 表示する際は、常に解決済みの型を使う
+        resolved_type = resolve(self.type)
         if not self.premises:
-            return f"{indent}{format_tenv(self.tenv)}|- {self.expr.to_string()} : {self.type} by {self.rule_name} {{}};"
+            return f"{indent}{format_tenv(self.tenv)}|- {self.expr.to_string()} : {resolved_type} by {self.rule_name} {{}};"
         else:
             premise_str = "\n".join(p.format(i + 1) for p in self.premises)
-            return f"{indent}{format_tenv(self.tenv)}|- {self.expr.to_string()} : {self.type} by {self.rule_name} {{\n{premise_str}\n{indent}}};"
+            return f"{indent}{format_tenv(self.tenv)}|- {self.expr.to_string()} : {resolved_type} by {self.rule_name} {{\n{premise_str}\n{indent}}};"
 
 # -------------------------------------------------------------------
-# 4. 型推論エンジン (type_infer)
+# 4. 型推論エンジン (Unification-based Type Inference)
 # -------------------------------------------------------------------
+
+def resolve(t: Type) -> Type:
+    """型変数の連鎖をたどり、最終的な型を返す。"""
+    if isinstance(t, TVar) and t.instance:
+        t.instance = resolve(t.instance)
+        return t.instance
+    return t
+
+def unify(t1: Type, t2: Type):
+    """二つの型を単一化する。"""
+    t1 = resolve(t1)
+    t2 = resolve(t2)
+
+    if isinstance(t1, TVar):
+        if t1 != t2: t1.instance = t2
+        return
+    if isinstance(t2, TVar):
+        t2.instance = t1
+        return
+    if isinstance(t1, TArrow) and isinstance(t2, TArrow):
+        unify(t1.param_type, t2.param_type)
+        unify(t1.return_type, t2.return_type)
+        return
+    if isinstance(t1, TList) and isinstance(t2, TList):
+        # [] の型推論のために、片方が未解決のリスト型の場合を考慮
+        if isinstance(resolve(t1.element_type), TError):
+             unify(t1.element_type, t2.element_type)
+        elif isinstance(resolve(t2.element_type), TError):
+             unify(t2.element_type, t1.element_type)
+        else:
+             unify(t1.element_type, t2.element_type)
+        return
+    if t1 != t2:
+        raise TypeError(f"型が一致しません: {t1} と {t2}")
+
+
 def type_infer(tenv: TypeEnv, expr: Expression, hint_type: Optional[Type] = None) -> Tuple[Type, Derivation]:
     if isinstance(expr, IntLiteral): return TInt(), TGeneric(tenv, expr, TInt(), "T-Int", [])
     if isinstance(expr, BoolLiteral): return TBool(), TGeneric(tenv, expr, TBool(), "T-Bool", [])
     if isinstance(expr, Nil):
-        if isinstance(hint_type, TList):
-            return hint_type, TGeneric(tenv, expr, hint_type, "T-Nil", [])
-        return TList(TError("ambiguous")), TGeneric(tenv, expr, TList(TError("ambiguous")), "T-Nil", [])
+        elem_type = TVar()
+        list_type = TList(elem_type)
+        if hint_type: unify(list_type, hint_type)
+        return list_type, TGeneric(tenv, expr, list_type, "T-Nil", [])
+
     if isinstance(expr, Variable):
         for var, t in reversed(tenv):
             if var == expr.name: return t, TGeneric(tenv, expr, t, "T-Var", [])
         raise TypeError(f"未定義の変数です: {expr.name}")
+
     if isinstance(expr, BinaryOp):
         t1, d1 = type_infer(tenv, expr.left)
         t2, d2 = type_infer(tenv, expr.right)
         if expr.op in ['+', '-', '*']:
-            if t1 != TInt() or t2 != TInt(): raise TypeError(f"{expr.op} の両辺はint型であるべきです")
+            unify(t1, TInt())
+            unify(t2, TInt())
             rule_map = {'+': 'T-Plus', '-': 'T-Minus', '*': 'T-Times'}
             return TInt(), TGeneric(tenv, expr, TInt(), rule_map[expr.op], [d1, d2])
         if expr.op == '<':
-            if t1 != TInt() or t2 != TInt(): raise TypeError("< の両辺はint型であるべきです")
+            unify(t1, TInt())
+            unify(t2, TInt())
             return TBool(), TGeneric(tenv, expr, TBool(), "T-Lt", [d1, d2])
         if expr.op == '::':
-            if not isinstance(t2, TList): raise TypeError(":: の右辺はlist型であるべきです")
-            if isinstance(t2.element_type, TError):
-                t2 = TList(t1)
-            elif t1 != t2.element_type: raise TypeError(f"リストの要素の型が一致しません: {t1} vs {t2.element_type}")
-            return t2, TGeneric(tenv, expr, t2, "T-Cons", [d1, d2])
+            list_type = TList(t1)
+            unify(list_type, t2)
+            return resolve(t2), TGeneric(tenv, expr, resolve(t2), "T-Cons", [d1, d2])
+
     if isinstance(expr, If):
         t_cond, d_cond = type_infer(tenv, expr.cond)
-        if t_cond != TBool(): raise TypeError("ifの条件式はbool型であるべきです")
+        unify(t_cond, TBool())
         t_true, d_true = type_infer(tenv, expr.true_branch, hint_type=hint_type)
         t_false, d_false = type_infer(tenv, expr.false_branch, hint_type=hint_type)
-        if t_true != t_false: raise TypeError("ifのthen節とelse節の型が一致しません")
-        return t_true, TGeneric(tenv, expr, t_true, "T-If", [d_cond, d_true, d_false])
+        unify(t_true, t_false)
+        res_type = resolve(t_true)
+        return res_type, TGeneric(tenv, expr, res_type, "T-If", [d_cond, d_true, d_false])
+
     if isinstance(expr, Let):
         t1, d1 = type_infer(tenv, expr.bound_expr, hint_type=expr.var_type)
-        if expr.var_type and t1 != expr.var_type:
-            raise TypeError(f"let式の型注釈が推論結果と一致しません: expected {expr.var_type}, got {t1}")
-        t2, d2 = type_infer(tenv + [(expr.var, t1)], expr.body_expr, hint_type=hint_type)
-        return t2, TGeneric(tenv, expr, t2, "T-Let", [d1, d2])
-    if isinstance(expr, Fun):
-        arg_type = expr.arg_type
-        if arg_type is None:
-            if isinstance(hint_type, TArrow):
-                arg_type = hint_type.param_type
-            else:
-                raise TypeError(f"型推論エラー: fun式 '{expr.arg_name}' の引数には型注釈が必要です。例: fun {expr.arg_name} : int -> ...")
+        if expr.var_type:
+            unify(t1, expr.var_type)
         
-        new_tenv = tenv + [(expr.arg_name, arg_type)]
-        ret_hint = hint_type.return_type if isinstance(hint_type, TArrow) else None
+        resolved_t1 = resolve(t1)
+        t2, d2 = type_infer(tenv + [(expr.var, resolved_t1)], expr.body_expr, hint_type=hint_type)
+        return t2, TGeneric(tenv, expr, t2, "T-Let", [d1, d2])
+
+    if isinstance(expr, Fun):
+        # arg_type_for_inference は、元のASTノード 'expr' を変更せずに、
+        # 型推論のボディ部分で使用する型を保持します。
+        # これにより、表示される出力が元のソースコードを反映するようになります。
+        arg_type_for_inference = expr.arg_type
+        ret_hint = None
+
+        if isinstance(hint_type, TArrow):
+            if arg_type_for_inference is None:
+                arg_type_for_inference = hint_type.param_type
+            else:
+                unify(arg_type_for_inference, hint_type.param_type)
+            ret_hint = hint_type.return_type
+
+        if arg_type_for_inference is None:
+            arg_type_for_inference = TVar()
+
+        new_tenv = tenv + [(expr.arg_name, arg_type_for_inference)]
         ret_type, d_body = type_infer(new_tenv, expr.body, hint_type=ret_hint)
         
-        func_type = TArrow(arg_type, ret_type)
+        func_type = TArrow(arg_type_for_inference, ret_type)
+        # 導出の構築には元の 'expr' を使用するため、その文字列表現は
+        # 推論プロセスによる影響を受けません。
         return func_type, TGeneric(tenv, expr, func_type, "T-Fun", [d_body])
+
     if isinstance(expr, App):
         t_func, d_func = type_infer(tenv, expr.func_expr)
-        if not isinstance(t_func, TArrow): raise TypeError("関数でないものを適用しようとしました")
-        t_arg, d_arg = type_infer(tenv, expr.arg_expr, hint_type=t_func.param_type)
-        if t_func.param_type != t_arg: raise TypeError(f"関数の引数の型が一致しません: expected {t_func.param_type}, got {t_arg}")
-        return t_func.return_type, TGeneric(tenv, expr, t_func.return_type, "T-App", [d_func, d_arg])
+        t_arg, d_arg = type_infer(tenv, expr.arg_expr)
+        
+        ret_type = TVar()
+        expected_func_type = TArrow(t_arg, ret_type)
+        unify(t_func, expected_func_type)
+        
+        final_ret_type = resolve(ret_type)
+        return final_ret_type, TGeneric(tenv, expr, final_ret_type, "T-App", [d_func, d_arg])
+
     if isinstance(expr, LetRec):
-        if not isinstance(expr.func_type, TArrow): raise TypeError("let recの型注釈は関数型であるべきです")
-        if expr.func_type.param_type != expr.arg_type: raise TypeError("let recの関数の引数型が一致しません")
+        unify(expr.func_type, TArrow(expr.arg_type, TVar())) # func_typeが関数型であることを保証
         
         env_for_body = tenv + [(expr.func_name, expr.func_type), (expr.arg_name, expr.arg_type)]
         t_body, d_body = type_infer(env_for_body, expr.func_body)
-        if t_body != expr.func_type.return_type: raise TypeError("let recの本体の戻り値の型が注釈と一致しません")
         
-        env_for_in, d_in = type_infer(tenv + [(expr.func_name, expr.func_type)], expr.let_body)
-        return env_for_in, TGeneric(tenv, expr, env_for_in, "T-LetRec", [d_body, d_in])
+        # func_typeの戻り値部分と実際の本体の戻り値を単一化
+        unify(expr.func_type.return_type, t_body)
+        
+        env_for_in = tenv + [(expr.func_name, expr.func_type)]
+        t_in, d_in = type_infer(env_for_in, expr.let_body)
+        return t_in, TGeneric(tenv, expr, t_in, "T-LetRec", [d_body, d_in])
+
     if isinstance(expr, Match):
         t_match, d_match = type_infer(tenv, expr.match_expr)
-        if not isinstance(t_match, TList): raise TypeError("matchの対象はリストであるべきです")
-        elem_type = t_match.element_type
+        elem_type = TVar()
+        unify(t_match, TList(elem_type))
         
         t_nil, d_nil = type_infer(tenv, expr.nil_branch)
         
-        env_cons = tenv + [(expr.head_var, elem_type), (expr.tail_var, t_match)]
+        env_cons = tenv + [(expr.head_var, resolve(elem_type)), (expr.tail_var, resolve(t_match))]
         t_cons, d_cons = type_infer(env_cons, expr.cons_branch)
         
-        if t_nil != t_cons: raise TypeError("matchのブランチの型が一致しません")
-        return t_nil, TGeneric(tenv, expr, t_nil, "T-Match", [d_match, d_nil, d_cons])
+        unify(t_nil, t_cons)
+        res_type = resolve(t_nil)
+        return res_type, TGeneric(tenv, expr, res_type, "T-Match", [d_match, d_nil, d_cons])
         
     raise TypeError(f"型推論未対応の式の型です: {type(expr)}")
 
 # -------------------------------------------------------------------
 # 5. パーサー (Parser with Type Annotations)
 # -------------------------------------------------------------------
+# ... (Parserは変更なし) ...
 class Parser:
     def __init__(self, tokens: List[Token]): self.tokens, self.pos = tokens, 0
     @classmethod
@@ -288,23 +378,30 @@ class Parser:
         return cls(tokens)
     def current_token(self) -> Token | None: return self.tokens[self.pos] if self.pos < len(self.tokens) else None
     def consume(self, expected_val=None):
-        if expected_val and (self.current_token() is None or self.current_token()[1] != expected_val):
+        if self.current_token() is None:
+            raise SyntaxError(f"入力の終端ですが、'{expected_val}'が予期されました")
+        if expected_val and self.current_token()[1] != expected_val:
              raise SyntaxError(f"'{expected_val}'が予期されましたが、'{self.current_token()}'が見つかりました")
         self.pos += 1
     def parse_type(self) -> Type:
-        t = self.parse_primary_type()
+        t = self.parse_atomic_type()
         if self.current_token() and self.current_token()[1] == '->':
             self.consume('->')
             return TArrow(t, self.parse_type())
         return t
+    def parse_atomic_type(self) -> Type:
+        # list修飾子を考慮してprimary_typeから変更
+        base_type = self.parse_primary_type()
+        if self.current_token() and self.current_token()[1] == 'list':
+            self.consume('list')
+            return TList(base_type)
+        return base_type
     def parse_primary_type(self) -> Type:
         kind, val = self.current_token()
         if val == 'int': self.consume('int'); return TInt()
         if val == 'bool': self.consume('bool'); return TBool()
         if val == '(':
             self.consume('('); t = self.parse_type(); self.consume(')');
-            if self.current_token() and self.current_token()[1] == 'list':
-                self.consume('list'); return TList(t)
             return t
         raise SyntaxError(f"型として予期しないトークンです: '{val}'")
     def parse_expression(self) -> Expression:
@@ -366,7 +463,7 @@ class Parser:
         return node
     def parse_cons(self) -> Expression:
         node = self.parse_add_sub()
-        if self.current_token() and self.current_token()[1] == '::':
+        while self.current_token() and self.current_token()[1] == '::':
             self.consume('::'); right_node = self.parse_cons(); node = Cons(node, right_node)
         return node
     def parse_add_sub(self) -> Expression:
@@ -384,7 +481,9 @@ class Parser:
             token = self.current_token()
             if token is None: break
             kind, val = token
-            if kind in ['INT', 'ID', 'TRUE', 'FALSE'] or val in ['(', '[']: node = App(node, self.parse_primary())
+            # ifの後に続く式などを考慮し、キーワードでない限り適用とみなす
+            if kind in ['INT', 'ID', 'TRUE', 'FALSE'] or val in ['(', '[']: 
+                node = App(node, self.parse_primary())
             else: break
         return node
     def parse_primary(self) -> Expression:
@@ -433,6 +532,9 @@ def main():
             line = line.strip()
             if not line: continue
             
+            # グローバルな型変数のカウンターをリセット
+            TVar._id_counter = 0
+
             parts = line.split("|-", 1)
             tenv_str, judgment_str = (parts[0].strip(), parts[1].strip()) if len(parts) == 2 else ("", line)
             
@@ -442,7 +544,6 @@ def main():
             
             try:
                 initial_tenv = parse_tenv_str(tenv_str)
-                
                 ast = run_parser_on_text(expr_str)
                 
                 expected_type = None
@@ -452,10 +553,12 @@ def main():
 
                 inferred_type, derivation_tree = type_infer(initial_tenv, ast, hint_type=expected_type)
                 
-                if expected_type and inferred_type != expected_type:
-                    if not (isinstance(inferred_type, TList) and isinstance(inferred_type.element_type, TError)):
-                       print(f"型エラー: 期待された型 '{expected_type}' と推論された型 '{inferred_type}' が異なります。")
-                
+                if expected_type:
+                    try:
+                        unify(inferred_type, expected_type)
+                    except TypeError:
+                         print(f"型エラー: 期待された型 '{expected_type}' と推論された型 '{resolve(inferred_type)}' が異なります。")
+
                 formatted_tree = derivation_tree.format(0)
                 if formatted_tree.endswith(';'): formatted_tree = formatted_tree[:-1]
                 print(formatted_tree)
