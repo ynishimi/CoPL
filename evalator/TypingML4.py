@@ -32,8 +32,10 @@ class TArrow(Type):
     return_type: Type
     def __str__(self):
         # 引数型が関数型の場合、括弧で囲みます。
+        # [修正点] resolve を使って型変数の先をたどり、正しく関数型か判定します。
+        p_type_resolved = resolve(self.param_type)
         p_str = str(self.param_type)
-        if isinstance(self.param_type, TArrow):
+        if isinstance(p_type_resolved, TArrow):
             p_str = f"({p_str})"
         return f"{p_str} -> {self.return_type}"
 
@@ -42,8 +44,10 @@ class TList(Type):
     element_type: Type
     def __str__(self):
         # 要素型が関数型の場合、括弧で囲みます。
+        # [修正点] resolve を使って型変数の先をたどり、正しく関数型か判定します。
+        e_type_resolved = resolve(self.element_type)
         e_str = str(self.element_type)
-        if isinstance(self.element_type, TArrow):
+        if isinstance(e_type_resolved, TArrow):
              e_str = f"({e_str})"
         return f"{e_str} list"
 
@@ -185,8 +189,12 @@ Token = Tuple[str, str]
 # 3. 導出規則 (Derivation)
 # -------------------------------------------------------------------
 def format_tenv(tenv: TypeEnv) -> str:
+    """
+    型環境を整形して文字列にします。
+    [修正点] 表示する前に各型を resolve し、推論結果を反映させます。
+    """
     if not tenv: return ""
-    return ", ".join(f"{var}:{t}" for var, t in tenv) + " "
+    return ", ".join(f"{var}:{resolve(t)}" for var, t in tenv) + " "
 
 class Derivation:
     def format(self, i=0) -> str: raise NotImplementedError
