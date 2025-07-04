@@ -1,0 +1,1 @@
+|- let rec length = fun l -> match l with [] -> 0 | x :: y -> 1 + length y in length (3 :: 2 :: []) + length ((1 :: []) :: []) : int
